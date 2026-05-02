@@ -214,50 +214,78 @@ async function sendPushNotifications(availableCourts) {
   
   const messages = [];
   
-  for (const token of courtData.pushTokens) {
+  // Validate and filter tokens
+  const validTokens = courtData.pushTokens.filter(token => {
     if (!Expo.isExpoPushToken(token)) {
-      addLog(`Invalid push token: ${token}`, 'error');
-      continue;
+      addLog(`Invalid push token found: ${token}`, 'error');
+      return false;
     }
-    
+    return true;
+  });
+  
+  if (validTokens.length === 0) {
+    addLog('No valid push tokens found', 'error');
+    return;
+  }
+  
+  addLog(`Preparing to send notifications to ${validTokens.length} devices`);
+  
+  for (const token of validTokens) {
     messages.push({
       to: token,
       sound: 'default',
       title: '🎾 Tennis Courts Available!',
-      body: `${availableCourts.length} courts available for upcoming Fridays`,
-      data: { availableCourts }
+      body: `${availableCourts.length} courts available for upcoming Fridays at Joe DiMaggio`,
+      data: { 
+        availableCourts,
+        timestamp: new Date().toISOString()
+      },
+      priority: 'high',
+      channelId: 'default'
     });
-  }
-  
-  if (messages.length === 0) {
-    addLog('No valid push tokens to send notifications');
-    return;
   }
   
   try {
     const chunks = expo.chunkPushNotifications(messages);
+    addLog(`Sending ${messages.length} notifications in ${chunks.length} chunks`);
+    
     for (const chunk of chunks) {
-      const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-      addLog(`Sent ${chunk.length} push notifications`);
+      try {
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        
+        // Log results
+        ticketChunk.forEach((ticket, index) => {
+          if (ticket.status === 'error') {
+            addLog(`Push notification error: ${ticket.message}`, 'error');
+          } else {
+            addLog(`Push notification sent successfully: ${ticket.id}`);
+          }
+        });
+        
+      } catch (chunkError) {
+        addLog(`Error sending notification chunk: ${chunkError.message}`, 'error');
+      }
     }
+    
   } catch (error) {
-    addLog(`Error sending push notifications: ${error.message}`, 'error');
+    addLog(`Error preparing push notifications: ${error.message}`, 'error');
   }
 }
 
 // API Routes
 app.get('/', (req, res) => {
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
+  console.log(`${req.method} ${req.url} - 200`);
   res.json({ 
     status: 'ok', 
     service: 'Court Monitor API',
     monitoring: courtData.isMonitoring,
-    lastCheck: courtData.lastCheck
+    lastCheck: courtData.lastCheck,
+    registeredTokens: courtData.pushTokens.length
   });
 });
 
 app.get('/api/status', (req, res) => {
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
+  console.log(`${req.method} ${req.url} - 200`);
   res.json({
     isMonitoring: courtData.isMonitoring,
     lastCheck: courtData.lastCheck,
@@ -267,7 +295,7 @@ app.get('/api/status', (req, res) => {
 });
 
 app.get('/api/courts', (req, res) => {
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
+  console.log(`${req.method} ${req.url} - 200`);
   res.json({
     courts: courtData.availableCourts,
     lastCheck: courtData.lastCheck
@@ -275,7 +303,7 @@ app.get('/api/courts', (req, res) => {
 });
 
 app.get('/api/logs', (req, res) => {
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
+  console.log(`${req.method} ${req.url} - 200`);
   res.json({
     logs: courtData.logs.slice(0, 50) // Last 50 logs
   });
@@ -289,14 +317,22 @@ app.post('/api/register-push', (req, res) => {
     return res.status(400).json({ error: 'Push token required' });
   }
   
-  if (!courtData.pushTokens.includes(token)) {
-    courtData.pushTokens.push(token);
-    addLog(`New device registered for notifications`);
-    saveData();
+  // Validate token format
+  if (!Expo.isExpoPushToken(token)) {
+    console.log(`${req.method} ${req.url} - 400`);
+    return res.status(400).json({ error: 'Invalid push token format' });
   }
   
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
-  res.json({ success: true });
+  if (!courtData.pushTokens.includes(token)) {
+    courtData.pushTokens.push(token);
+    addLog(`New device registered for notifications (${token.substring(0, 20)}...)`);
+    saveData();
+  } else {
+    addLog(`Device token already registered (${token.substring(0, 20)}...)`);
+  }
+  
+  console.log(`${req.method} ${req.url} - 200`);
+  res.json({ success: true, totalTokens: courtData.pushTokens.length });
 });
 
 app.post('/api/toggle-monitoring', (req, res) => {
@@ -304,16 +340,36 @@ app.post('/api/toggle-monitoring', (req, res) => {
   addLog(`Monitoring ${courtData.isMonitoring ? 'enabled' : 'disabled'}`);
   saveData();
   
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
+  console.log(`${req.method} ${req.url} - 200`);
   res.json({ isMonitoring: courtData.isMonitoring });
 });
 
 app.post('/api/check-now', async (req, res) => {
-  console.log(`${req.method} ${req.url} - ${res.statusCode}`);
-  res.json({ message: 'Check initiated' });
+  console.log(`${req.method} ${req.url} - 200`);
+  res.json({ message: 'Check initiated', timestamp: new Date().toISOString() });
   
   // Run check in background
   scrapeCourtAvailability();
+});
+
+app.post('/api/test-notification', async (req, res) => {
+  if (courtData.pushTokens.length === 0) {
+    return res.status(400).json({ error: 'No registered devices' });
+  }
+  
+  addLog('Sending test notifications...');
+  
+  const testCourts = [{
+    date: 'Test Date',
+    time: 'Test Time',
+    court: 'Test Court',
+    available: true
+  }];
+  
+  await sendPushNotifications(testCourts);
+  
+  console.log(`${req.method} ${req.url} - 200`);
+  res.json({ message: 'Test notifications sent', devices: courtData.pushTokens.length });
 });
 
 // Schedule court monitoring every 30 minutes
